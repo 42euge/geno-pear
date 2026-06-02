@@ -1,0 +1,9 @@
+name: geno-pear
+version: 0.1.0
+description: >-
+  Pair programming companion — monitors file changes and writes
+  contextual feedback to a sidecar markdown file
+config:
+  - { src: config/defaults/pear.yaml, dst: pear.yaml }
+skills:
+  source: skills/

@@ -1,0 +1,17 @@
+# geno-pear configuration
+# Copy to ~/.geno-tools/geno-pear/configs/pear.yaml to customize
+
+defaults:
+  persona: reviewer
+  poll_interval_seconds: 1
+
+ai_channel:
+  markers:
+    c_family: ["// START AI CHANNEL", "// END AI CHANNEL"]
+    python: ["# START AI CHANNEL", "# END AI CHANNEL"]
+    sql: ["-- START AI CHANNEL", "-- END AI CHANNEL"]
+  auto_detect: true
+
+scratchpad:
+  width: 60
+  overwrite: true
