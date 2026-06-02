@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.geno/
+CLAUDE.local.md
+.env
+*.egg-info/
+dist/
+build/
