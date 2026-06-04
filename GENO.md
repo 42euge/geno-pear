@@ -37,7 +37,9 @@ current directory until a `.geno/` directory is found.
     └── {YYYYMMDD-HHMM}/
         ├── session.yaml       # Session metadata
         ├── scratchpad.md      # Final scratchpad state (persisted copy)
-        └── qa-log.json        # All AI channel interactions with timestamps
+        ├── session-log.json   # All AI channel interactions with timestamps
+        └── history/           # Timestamped scratchpad snapshots
+            └── {YYYYMMDD-HHMMSS}.md
 ```
 
 ## Core concepts
@@ -63,8 +65,9 @@ Markers auto-detect from file extension:
 
 The scratchpad is a markdown file written adjacent to the watched file (or at
 a custom path). It shows the **current state** of feedback — each save
-overwrites the previous content. Historical interactions are preserved only in
-`qa-log.json`.
+overwrites the previous content. After each write, the scratchpad is also
+copied to a `history/` directory with a timestamp filename, preserving every
+version. Historical interactions are preserved in `session-log.json`.
 
 Optimized for IDE sidebar viewing: ~60 char line width, no walls of text.
 

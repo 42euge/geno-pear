@@ -23,7 +23,7 @@ observability:
   knowledge_writes:
     - "<scratchpad-path> (feedback output, overwritten on each change)"
     - ".geno/geno-pear/sessions/<timestamp>/session.yaml"
-    - ".geno/geno-pear/sessions/<timestamp>/qa-log.json"
+    - ".geno/geno-pear/sessions/<timestamp>/session-log.json"
     - ".geno/geno-pear/sessions/<timestamp>/scratchpad.md (final copy)"
 ---
 
@@ -69,7 +69,7 @@ and updates a scratchpad they can glance at in their IDE sidebar.
    questions: 0
    persona_switches: []
    ```
-4. Write initial `qa-log.json` as `[]`.
+4. Write initial `session-log.json` as `[]`.
 5. Write the initial scratchpad with the persona's header template and any context summary.
 
 ### 3. Start the file monitor
@@ -94,7 +94,8 @@ On each `CHANGED` notification from the Monitor:
    - Clear the markers from the file using Edit (replace the marker block with empty string).
 3. **Analyze** the code through the active persona's lens (see Personas below).
 4. **Write** the scratchpad — overwrite the entire file with current feedback. Keep output compact (~60 char line width) for IDE sidebar viewing.
-5. **Log** the interaction: if an AI channel question was found, append to `qa-log.json`:
+5. **Save history** — copy the scratchpad to the history directory with a timestamp filename (`{YYYYMMDD-HHMMSS}.md`). This preserves every version of the scratchpad across saves. If the persona provides a custom `--history-dir`, use that; otherwise use `.geno/geno-pear/sessions/{timestamp}/history/`.
+6. **Log** the interaction: if an AI channel question was found, append to `session-log.json`:
    ```json
    {
      "timestamp": "<ISO-8601>",
@@ -104,7 +105,7 @@ On each `CHANGED` notification from the Monitor:
      "topic": "<inferred-topic>"
    }
    ```
-6. Increment `interactions` count in memory (written to session.yaml at end).
+7. Increment `interactions` count in memory (written to session.yaml at end).
 
 ### 5. Handle AI channel commands
 
