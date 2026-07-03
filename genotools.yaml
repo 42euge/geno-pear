@@ -1,5 +1,5 @@
 name: geno-pear
-version: 0.1.0
+version: 0.2.0
 description: >-
   Pair programming companion — monitors file changes and writes
   contextual feedback to a sidecar markdown file

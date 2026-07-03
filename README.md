@@ -59,3 +59,15 @@ Save the file and check the scratchpad for the response.
 ## License
 
 MIT
+
+## Library
+
+geno-pear's watch mechanism is importable — any geno tool can reuse it:
+
+```python
+from geno_pear import watch
+watch("/path/to/file", on_change=lambda p: print(f"{p} changed"))  # blocks; return False to stop
+```
+
+geno-vault's `vault watch` composes exactly this. Also exposed as a CLI:
+`pear watch <file> --exec "<cmd>"`.
