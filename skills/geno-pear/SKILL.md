@@ -10,7 +10,7 @@ argument-hint: "<file-path> [--persona reviewer|mentor|pair|custom] [--scratchpa
 license: MIT
 metadata:
   author: 42euge
-  version: "0.1.0"
+  version: "0.2.0"
 observability:
   success_signal: "session completed with at least one feedback cycle written to scratchpad"
   failure_signals:
