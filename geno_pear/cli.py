@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--interval", type=float, default=1.0)
     a = p.parse_args(argv[1:])
 
-    from .commands import process_commands, init_commands_dir, find_commands_dir
+    from .commands import check_commit, init_commands_dir, find_commands_dir
     import time as _t
 
     commands_dir = find_commands_dir(a.file)
@@ -43,18 +43,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"watching {a.file}  (Ctrl-C to stop)")
     print(f"  .commands/: {commands_dir}")
+    print(f"  draft: ///command   commit: ////  or  ////command")
     if a.cmd:
         print(f"  --exec: {a.cmd}")
 
     def on_change(p):
-        ts = _t.strftime("%H:%M:%S")
-        results = process_commands(p, log=lambda s: print(s))
-        if results:
-            print(f"  {ts} {len(results)} command(s) executed")
-        elif a.cmd:
+        triggered = check_commit(p, log=print)
+        if not triggered and a.cmd:
             subprocess.run(a.cmd, shell=True)
-        else:
-            print(f"  {ts} saved")
 
     try:
         watch(a.file, on_change, interval=a.interval)
