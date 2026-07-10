@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geno-pear"
+version = "0.3.0"
+description = "File-watch companion + ///command registry for the geno ecosystem."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "42euge" }]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+pear = "geno_pear.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["geno_pear*"]
