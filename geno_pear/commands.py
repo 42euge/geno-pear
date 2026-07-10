@@ -87,27 +87,98 @@ def load_command(commands_dir: Path, name: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _patch_file(file_path: Path, old: str, new: str) -> None:
-    """Replace old with new in file, with a short retry on race."""
+def _replace_line(file_path: Path, old_line: str, new_line: str) -> bool:
+    """Replace a WHOLE line (matched exactly, stripped) with new_line.
+
+    Line-anchored — never a substring replace — so a short/growing status
+    string can't accidentally match text elsewhere in the file. Returns True
+    if a line was replaced.
+    """
+    old_stripped = old_line.strip()
     for _ in range(3):
         try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
-            if old in text:
-                file_path.write_text(text.replace(old, new, 1), encoding="utf-8")
-            return
+            lines = file_path.read_text(encoding="utf-8", errors="replace").split("\n")
+            for i, line in enumerate(lines):
+                if line.strip() == old_stripped:
+                    lines[i] = new_line
+                    file_path.write_text("\n".join(lines), encoding="utf-8")
+                    return True
+            return False
         except OSError:
             time.sleep(0.1)
+    return False
 
 
-def _set_status(file_path: Path, commit_line: str, status: str) -> None:
-    """Update the heard/status line in the file."""
-    _patch_file(file_path, commit_line, status)
+def _set_status(file_path: Path, commit_line: str, status: str,
+                stream: bool = False, char_delay: float = 0.025) -> None:
+    """Update the status line in the file (whole-line replace).
+
+    If stream=True, types the status character-by-character so Obsidian renders
+    it progressively. Uses line-anchored replacement, so the growing prefix can
+    never collide with other text in the file.
+    """
+    if not stream or len(status) <= 20:
+        _replace_line(file_path, commit_line, status)
+        return
+
+    prev = commit_line
+    for i in range(1, len(status) + 1):
+        if not _replace_line(file_path, prev, status[:i]):
+            # line vanished (user edited) — stop streaming
+            return
+        prev = status[:i]
+        if i < len(status):
+            time.sleep(char_delay)
 
 
-def execute_command(script: str, args: str = "", cwd: str | None = None) -> tuple[int, str]:
+def execute_command(script: str, args: str = "", cwd: str | None = None) -> tuple[int, str, str | None]:
+    """Run a shell script. Returns (returncode, output, agent_id_or_None).
+
+    If the script prints GENO_AGENT_ID=<id> to stdout, the caller should switch
+    to agent-polling mode instead of waiting for the subprocess to finish.
+    """
     full = script.replace("$ARGS", args).replace("${ARGS}", args)
     r = subprocess.run(full, shell=True, capture_output=True, text=True, cwd=cwd)
-    return r.returncode, (r.stdout + r.stderr).strip()
+    out = (r.stdout + r.stderr).strip()
+    # Detect if command launched a tracked agent
+    agent_id = None
+    for line in out.splitlines():
+        if line.startswith("GENO_AGENT_ID="):
+            agent_id = line.split("=", 1)[1].strip()
+            break
+    return r.returncode, out, agent_id
+
+
+def _poll_agent(file_path: Path, agent_id: str, current_status_line: str,
+                command_name: str, log) -> None:
+    """Poll the agent registry every 2s and write status back to the file.
+    Returns when agent reaches done/error. Does NOT write the final done marker
+    here — that happens in the main flow after all commands finish.
+    """
+    try:
+        from .agent import read_status
+    except ImportError:
+        log(f"    geno-agent not available — cannot poll agent {agent_id}")
+        return
+
+    heard_line = current_status_line
+    ts = time.strftime("%H:%M:%S")
+    timeout = time.monotonic() + 600  # 10 min max
+
+    while time.monotonic() < timeout:
+        data = read_status(agent_id)
+        if not data:
+            time.sleep(2)
+            continue
+        status = data.get("status", "running")
+        msg = data.get("message", "")[:60]
+        new_line = f"// heard @ {ts} - agent {command_name}: {msg} //"
+        _set_status(file_path, heard_line, new_line)
+        heard_line = new_line
+        log(f"    [{status}] {msg}")
+        if status in ("done", "error"):
+            break
+        time.sleep(2)
 
 
 def _run_with_feedback(
@@ -121,7 +192,7 @@ def _run_with_feedback(
     """Execute commands with inline file status updates."""
     ts = time.strftime("%H:%M:%S")
     heard_line = f"// heard @ {ts} //"
-    _set_status(file_path, commit_line, heard_line)
+    _set_status(file_path, commit_line, heard_line, stream=True)
 
     results = []
     for name, args in commands:
@@ -139,38 +210,41 @@ def _run_with_feedback(
         heard_line = running_msg
         log(f"  ▶ ///{name} {args}".rstrip())
 
-        # Ticker: update status every 2s while running
-        done_event = threading.Event()
-        tick_count = [0]
+        rc, out, agent_id = execute_command(script, args=args, cwd=str(file_path.parent))
 
-        def _tick():
-            while not done_event.wait(2):
-                tick_count[0] += 1
-                nonlocal heard_line
-                msg = f"// heard @ {ts} - {name} ({tick_count[0]*2}s)... //"
-                _set_status(file_path, heard_line, msg)
-                heard_line = msg
-
-        ticker = threading.Thread(target=_tick, daemon=True)
-        ticker.start()
-
-        rc, out = execute_command(script, args=args, cwd=str(file_path.parent))
-        done_event.set()
-        ticker.join(timeout=0.5)
-
-        status = "✓" if rc == 0 else f"✗ exit {rc}"
         if out:
             for line in out.splitlines()[:3]:
                 log(f"    {line}")
+
+        if agent_id:
+            # Command launched a tracked agent — poll the registry instead of the 2s timer
+            log(f"    agent {agent_id} launched — polling for completion…")
+            _poll_agent(file_path, agent_id, heard_line, name, log)
+            # _poll_agent writes done/error marker when finished; skip normal done below
+            results.append(f"agent:{name}:{agent_id}")
+            continue
+        else:
+            # Synchronous command — simple ticker
+            done_event = threading.Event()
+            tick_count = [0]
+
+            def _tick():
+                while not done_event.wait(2):
+                    tick_count[0] += 1
+                    nonlocal heard_line
+                    msg = f"// heard @ {ts} - {name} ({tick_count[0]*2}s)... //"
+                    _set_status(file_path, heard_line, msg)
+                    heard_line = msg
+
+            ticker = threading.Thread(target=_tick, daemon=True)
+            ticker.start()
+            # command already ran above; just stop the ticker
+            done_event.set()
+            ticker.join(timeout=0.5)
+
+        status = "✓" if rc == 0 else f"✗ exit {rc}"
         log(f"    {status} {name}")
         results.append(f"{status}:{name}")
-
-        # Remove the original ///name draft line
-        _patch_file(
-            file_path,
-            "",  # handled below holistically
-            "",
-        )
 
     # Remove all processed draft lines + replace status with done
     text = file_path.read_text(encoding="utf-8", errors="replace")
@@ -179,12 +253,12 @@ def _run_with_feedback(
         text = re.sub(pattern, "", text, flags=re.MULTILINE)
     if freeform.strip():
         log(f"  📝 freeform: {freeform[:60].strip()}")
-    # Replace current status line with done
+    # Replace current heard line (line-anchored) with done marker
     done_ts = time.strftime("%H:%M:%S")
-    text = re.sub(r"^// heard[^\n]*//\s*$",
-                  f"// done @ {done_ts} //", text, flags=re.MULTILINE)
+    done_line = f"// done @ {done_ts} //"
+    text = re.sub(r"^// heard[^\n]*//\s*$", done_line, text, count=1, flags=re.MULTILINE)
     file_path.write_text(text, encoding="utf-8")
-    log(f"  ✓ done — delete '// done @ {done_ts} //' to acknowledge")
+    log(f"  ✓ done — delete '{done_line}' to acknowledge")
 
 
 def check_commit(file_path: str | Path, log=print) -> bool:
@@ -231,8 +305,8 @@ def check_commit(file_path: str | Path, log=print) -> bool:
                 freeform_lines.append(line)
         freeform = "\n".join(freeform_lines[-10:])  # last 10 freeform lines
         if not commands and not freeform.strip():
-            # Nothing to do — remove the //// and leave
-            _patch_file(p, commit_line + "\n", "")
+            # Nothing to do — remove the //// line and leave
+            _replace_line(p, commit_line, "")
             return False
         count = len(commands)
         log(f"  ◉ commit all: {count} command(s)")

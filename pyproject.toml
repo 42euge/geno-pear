@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geno-pear"
-version = "0.3.0"
+version = "0.4.0"
 description = "File-watch companion + ///command registry for the geno ecosystem."
 readme = "README.md"
 license = { text = "MIT" }
@@ -17,6 +17,7 @@ test = ["pytest>=8.0"]
 
 [project.scripts]
 pear = "geno_pear.cli:main"
+geno-agent = "geno_pear.agent:main"
 
 [tool.setuptools.packages.find]
 include = ["geno_pear*"]
