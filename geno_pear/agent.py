@@ -114,6 +114,30 @@ def wait_for_agent(agent_id: str, timeout: float = 300.0, poll: float = 2.0) -> 
     return None
 
 
+def _pretrust_claude_dir(cwd: str) -> None:
+    """Pre-accept Claude Code's folder-trust dialog for cwd so an interactive
+    session launched by geno-agent doesn't block on 'Do you trust this folder?'
+    (nobody is at the keyboard to press Enter). Idempotent, best-effort."""
+    cfg = Path.home() / ".claude.json"
+    try:
+        data = json.loads(cfg.read_text()) if cfg.exists() else {}
+    except Exception:
+        return
+    projects = data.setdefault("projects", {})
+    entry = projects.setdefault(cwd, {})
+    changed = False
+    for key, val in (("hasTrustDialogAccepted", True),
+                     ("hasCompletedProjectOnboarding", True)):
+        if entry.get(key) != val:
+            entry[key] = val
+            changed = True
+    if changed:
+        try:
+            cfg.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
+
+
 def _close_own_iterm_tab() -> None:
     """Close the iTerm session this process is running in, using ITERM_SESSION_ID.
 
@@ -188,6 +212,10 @@ def run_agent_pty(agent_id: str, cmd: list[str], source_file: str = "",
     log_path = Path(log_file) if log_file else _log_path(agent_id)
     write_status(agent_id, "running", "starting…",
                  source_file=source_file, output_file=output_file)
+
+    # Pre-accept Claude's folder-trust dialog for our cwd so the interactive
+    # session doesn't hang waiting for a keypress nobody will give.
+    _pretrust_claude_dir(os.getcwd())
 
     # Fork a child attached to a new PTY
     pid, master_fd = pty.fork()
