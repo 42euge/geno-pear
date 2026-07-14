@@ -17,6 +17,8 @@ CLI:
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import sys
 import threading
@@ -24,6 +26,9 @@ import time
 from pathlib import Path
 
 AGENTS_DIR = Path.home() / ".geno" / "agents"
+
+# Strip ANSI escape sequences when extracting status text from the PTY stream
+_ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 # Sentinel prefix printed by commands that launch tracked agents
 AGENT_ID_PREFIX = "GENO_AGENT_ID="
@@ -130,6 +135,145 @@ def _close_own_iterm_tab() -> None:
         pass
 
 
+def _last_meaningful_line(buf: bytes) -> str:
+    """Extract the last non-empty human-readable line from a PTY byte buffer."""
+    text = _ANSI.sub(b"", buf).decode("utf-8", errors="replace")
+    lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n")]
+    for ln in reversed(lines):
+        # Skip empty, box-drawing-only, and prompt-cruft lines
+        if ln and not all(c in "─│╭╮╰╯━┃┏┓┗┛ >·•" for c in ln) and len(ln) > 2:
+            return ln[:80]
+    return ""
+
+
+def run_agent_pty(agent_id: str, cmd: list[str], source_file: str = "",
+                  output_file: str = "", log_file: str = "",
+                  close_on_done: bool = False) -> int:
+    """Run cmd in a PTY so it keeps FULL interactive terminal functionality
+    (Claude Code renders its TUI, accepts keystrokes), while geno-agent tees
+    the output stream to extract live status for the registry.
+
+    This is the interactive counterpart to run_agent(): the user sees and can
+    drive Claude Code normally in the iTerm tab; geno-agent sits transparently
+    in the middle, forwarding stdin<->pty and mirroring pty->stdout, and every
+    2s writes the last meaningful output line to ~/.geno/agents/<id>.json.
+    """
+    import pty
+    import select
+    import termios
+    import tty
+    import struct
+    import fcntl
+    import signal
+
+    log_path = Path(log_file) if log_file else _log_path(agent_id)
+    write_status(agent_id, "running", "starting…",
+                 source_file=source_file, output_file=output_file)
+
+    # Fork a child attached to a new PTY
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        # Child: exec the command (inherits the slave PTY as its controlling tty)
+        try:
+            os.execvp(cmd[0], cmd)
+        except Exception as e:
+            sys.stderr.write(f"exec failed: {e}\n")
+            os._exit(127)
+
+    # Parent: relay between our stdio and the child PTY
+    ring = bytearray()          # rolling buffer of recent output for status
+    logf = open(log_path, "ab", buffering=0)
+
+    # Put our own stdin in raw mode so keystrokes pass straight through
+    stdin_fd = sys.stdin.fileno()
+    old_termios = None
+    try:
+        old_termios = termios.tcgetattr(stdin_fd)
+        tty.setraw(stdin_fd)
+    except Exception:
+        pass
+
+    # Propagate terminal size to the PTY, and on SIGWINCH
+    def _set_winsize():
+        try:
+            sz = fcntl.ioctl(stdin_fd, termios.TIOCGWINSZ, b"\x00" * 8)
+            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, sz)
+        except Exception:
+            pass
+    _set_winsize()
+    try:
+        signal.signal(signal.SIGWINCH, lambda *_: _set_winsize())
+    except Exception:
+        pass
+
+    # Status ticker: every 2s parse the ring buffer for the latest line
+    stop = threading.Event()
+
+    def _ticker():
+        while not stop.wait(2):
+            msg = _last_meaningful_line(bytes(ring))
+            if msg:
+                # don't clobber a self-signalled done/error
+                cur = read_status(agent_id)
+                if cur and cur.get("status") in ("done", "error"):
+                    return
+                write_status(agent_id, "running", msg,
+                             source_file=source_file, output_file=output_file)
+    threading.Thread(target=_ticker, daemon=True).start()
+
+    try:
+        while True:
+            try:
+                rlist, _, _ = select.select([master_fd, stdin_fd], [], [], 0.1)
+            except (OSError, ValueError):
+                break
+            if master_fd in rlist:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                os.write(sys.stdout.fileno(), data)   # mirror to real screen
+                logf.write(data)                       # tee to log
+                ring.extend(data)
+                if len(ring) > 8192:
+                    del ring[:-8192]
+            if stdin_fd in rlist:
+                try:
+                    inp = os.read(stdin_fd, 4096)
+                except OSError:
+                    inp = b""
+                if inp:
+                    os.write(master_fd, inp)           # forward keystrokes
+    finally:
+        stop.set()
+        if old_termios is not None:
+            try:
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_termios)
+            except Exception:
+                pass
+        logf.close()
+
+    _, status = os.waitpid(pid, 0)
+    rc = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+
+    data = read_status(agent_id)
+    if data and data.get("status") == "done":
+        pass  # agent signalled itself
+    elif rc == 0:
+        write_status(agent_id, "done", "completed (exit 0)",
+                     source_file=source_file, output_file=output_file)
+    else:
+        write_status(agent_id, "error", f"exit {rc}",
+                     source_file=source_file, output_file=output_file)
+
+    if close_on_done:
+        time.sleep(3)
+        _close_own_iterm_tab()
+    return rc
+
+
 def run_agent(agent_id: str, cmd: list[str], source_file: str = "",
               output_file: str = "", log_file: str = "",
               close_on_done: bool = False) -> int:
@@ -219,6 +363,10 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--log", default="", help="log file path")
     p_run.add_argument("--close-on-done", action="store_true",
                        help="close the iTerm tab when the agent finishes")
+    p_run.add_argument("--interactive", action="store_true",
+                       help="run in a PTY so the command keeps full interactive "
+                            "terminal functionality (TUI, keystrokes) while geno-agent "
+                            "tees output for status tracking")
     p_run.add_argument("rest", nargs=argparse.REMAINDER, help="command to run (after --)")
 
     # done / error
@@ -250,7 +398,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd = cmd[1:]
         if not cmd:
             raise SystemExit("geno-agent run: no command given after --")
-        rc = run_agent(
+        runner = run_agent_pty if args.interactive else run_agent
+        rc = runner(
             args.agent_id, cmd,
             source_file=args.source,
             output_file=args.output,
