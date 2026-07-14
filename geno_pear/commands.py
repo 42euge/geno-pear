@@ -195,6 +195,59 @@ def _poll_agent(file_path: Path, agent_id: str, current_status_line: str,
         time.sleep(2)
 
 
+def _append_status_line(file_path: Path, anchor: str, new_line: str) -> None:
+    """Insert new_line right after the anchor line (whole-line match). Used to
+    give each agent its OWN status line so parallel agents don't clobber each
+    other. Falls back to appending at EOF if the anchor isn't found."""
+    for _ in range(3):
+        try:
+            lines = file_path.read_text(encoding="utf-8", errors="replace").split("\n")
+            for i, ln in enumerate(lines):
+                if ln.strip() == anchor.strip():
+                    lines.insert(i + 1, new_line)
+                    file_path.write_text("\n".join(lines), encoding="utf-8")
+                    return
+            lines.append(new_line)
+            file_path.write_text("\n".join(lines), encoding="utf-8")
+            return
+        except OSError:
+            time.sleep(0.1)
+
+
+def _poll_agent_background(file_path: Path, agent_id: str, status_line: str,
+                           command_name: str, log) -> None:
+    """Daemon-thread poller: owns ONE per-agent status line, updates it from the
+    registry, and swaps it to a done/error marker when finished. Multiple of
+    these run concurrently for parallel agents — each keyed to its own line."""
+    try:
+        from geno_agents import read_status
+    except ImportError:
+        try:
+            from geno_pear.agent import read_status  # legacy fallback
+        except ImportError:
+            return
+    cur_line = status_line
+    deadline = time.monotonic() + 1800  # 30 min cap
+    while time.monotonic() < deadline:
+        data = read_status(agent_id)
+        if data:
+            st = data.get("status", "running")
+            msg = (data.get("message") or "")[:60]
+            if st in ("done", "error"):
+                mark = "done" if st == "done" else "error"
+                final = f"// {mark} @ {time.strftime('%H:%M:%S')} · {command_name} //"
+                _replace_line(file_path, cur_line, final)
+                log(f"    {mark}: {command_name} ({agent_id})")
+                return
+            new_line = f"// heard · {command_name}: {msg} //"
+            if new_line != cur_line:
+                _replace_line(file_path, cur_line, new_line)
+                cur_line = new_line
+        time.sleep(2)
+    # timed out
+    _replace_line(file_path, cur_line, f"// error @ {time.strftime('%H:%M:%S')} · {command_name} timed out //")
+
+
 def _run_with_feedback(
     file_path: Path,
     commit_line: str,
@@ -203,76 +256,57 @@ def _run_with_feedback(
     freeform: str,
     log=print,
 ) -> None:
-    """Execute commands with inline file status updates."""
+    """Execute commands. Agent-launching commands are FIRE-AND-FORGET: each gets
+    its own status line + a background poller, and this function returns promptly
+    so the watcher can accept more //// commits (enabling parallel agents).
+    Synchronous commands run inline and finish before returning."""
     ts = time.strftime("%H:%M:%S")
-    heard_line = f"// heard @ {ts} //"
-    _set_status(file_path, commit_line, heard_line, stream=True)
+    # First, consume the draft lines + the commit line so the watcher's status
+    # gate clears immediately and a new //// can be committed while agents run.
+    text = file_path.read_text(encoding="utf-8", errors="replace")
+    for name, _a in commands:
+        text = re.sub(rf"^///{re.escape(name)}[ \t]*[^\n]*\n?", "", text, flags=re.MULTILINE)
+    text = re.sub(rf"^{re.escape(commit_line.strip())}\s*$\n?", "", text, count=1, flags=re.MULTILINE)
+    file_path.write_text(text, encoding="utf-8")
 
-    results = []
+    if freeform.strip():
+        log(f"  📝 freeform: {freeform[:60].strip()}")
+
+    launched_agents = 0
     for name, args in commands:
         script = load_command(commands_dir, name)
         if script is None:
-            msg = f"// heard @ {ts} - ⚠ {name} not found //"
-            _set_status(file_path, heard_line, msg)
-            heard_line = msg
             log(f"  ⚠ ///{name} — not in {commands_dir}")
-            results.append(f"MISSING:{name}")
             continue
-
-        running_msg = f"// heard @ {ts} - running {name}... //"
-        _set_status(file_path, heard_line, running_msg)
-        heard_line = running_msg
         log(f"  ▶ ///{name} {args}".rstrip())
 
         rc, out, agent_id = execute_command(script, args=args, cwd=str(file_path.parent))
-
         if out:
             for line in out.splitlines()[:3]:
                 log(f"    {line}")
 
         if agent_id:
-            # Command launched a tracked agent — poll the registry instead of the 2s timer
-            log(f"    agent {agent_id} launched — polling for completion…")
-            _poll_agent(file_path, agent_id, heard_line, name, log)
-            # _poll_agent writes done/error marker when finished; skip normal done below
-            results.append(f"agent:{name}:{agent_id}")
-            continue
+            # Fire-and-forget: append a dedicated status line for this agent and
+            # spawn a background poller. Do NOT block — lets the next command /
+            # the next //// commit proceed in parallel.
+            status_line = f"// heard · {name}: launching… //"
+            _append_status_line(file_path, "", status_line)  # append at EOF
+            log(f"    agent {agent_id} launched (background poll)")
+            threading.Thread(
+                target=_poll_agent_background,
+                args=(file_path, agent_id, status_line, name, log),
+                daemon=True,
+            ).start()
+            launched_agents += 1
         else:
-            # Synchronous command — simple ticker
-            done_event = threading.Event()
-            tick_count = [0]
+            # Synchronous command finished; note it briefly at EOF.
+            mark = "done" if rc == 0 else "error"
+            _append_status_line(file_path, "",
+                                f"// {mark} @ {time.strftime('%H:%M:%S')} · {name} //")
+            log(f"    {'✓' if rc == 0 else '✗'} {name}")
 
-            def _tick():
-                while not done_event.wait(2):
-                    tick_count[0] += 1
-                    nonlocal heard_line
-                    msg = f"// heard @ {ts} - {name} ({tick_count[0]*2}s)... //"
-                    _set_status(file_path, heard_line, msg)
-                    heard_line = msg
-
-            ticker = threading.Thread(target=_tick, daemon=True)
-            ticker.start()
-            # command already ran above; just stop the ticker
-            done_event.set()
-            ticker.join(timeout=0.5)
-
-        status = "✓" if rc == 0 else f"✗ exit {rc}"
-        log(f"    {status} {name}")
-        results.append(f"{status}:{name}")
-
-    # Remove all processed draft lines + replace status with done
-    text = file_path.read_text(encoding="utf-8", errors="replace")
-    for name, args in commands:
-        pattern = rf"^///{re.escape(name)}[ \t]*[^\n]*\n?"
-        text = re.sub(pattern, "", text, flags=re.MULTILINE)
-    if freeform.strip():
-        log(f"  📝 freeform: {freeform[:60].strip()}")
-    # Replace current heard line (line-anchored) with done marker
-    done_ts = time.strftime("%H:%M:%S")
-    done_line = f"// done @ {done_ts} //"
-    text = re.sub(r"^// heard[^\n]*//\s*$", done_line, text, count=1, flags=re.MULTILINE)
-    file_path.write_text(text, encoding="utf-8")
-    log(f"  ✓ done — delete '{done_line}' to acknowledge")
+    if launched_agents:
+        log(f"  {launched_agents} agent(s) running in background — watcher free for new commits")
 
 
 def check_commit(file_path: str | Path, log=print) -> bool:
@@ -282,10 +316,11 @@ def check_commit(file_path: str | Path, log=print) -> bool:
         return False
     content = p.read_text(encoding="utf-8", errors="replace")
 
-    # Don't re-trigger while a status marker is still in the file
-    if _STATUS_RE.search(content):
-        return False
-
+    # NOTE: no status-marker gate anymore. _run_with_feedback consumes the ////
+    # commit line synchronously before launching any (fire-and-forget) agents,
+    # so there's no re-trigger window — and per-agent status lines are allowed to
+    # persist while multiple agents run in parallel. Only an unconsumed //// on a
+    # subsequent save triggers a new batch.
     commands_dir = find_commands_dir(p)
     init_commands_dir(commands_dir)
 
