@@ -48,6 +48,21 @@ _STATUS_RE = re.compile(r"^// (heard|done|error)[^\n]*//\s*$", re.MULTILINE)
 _RUN_RE = re.compile(r"## Run\s*```(?:bash|sh)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
+def _load_read_status():
+    """Return geno_agents.read_status if geno-agents is installed, else None.
+
+    Agent execution/tracking lives in geno-agents (the `geno-agent` CLI). geno-pear
+    only *polls* the registry to mirror status into the watched file, so it depends
+    on geno-agents softly — the ///command protocol still works without it, agents
+    just won't report live status.
+    """
+    try:
+        from geno_agents import read_status
+        return read_status
+    except ImportError:
+        return None
+
+
 def find_commands_dir(watched_file: str | Path) -> Path:
     p = Path(watched_file).resolve()
     for parent in [p.parent] + list(p.parents):
@@ -155,10 +170,9 @@ def _poll_agent(file_path: Path, agent_id: str, current_status_line: str,
     Returns when agent reaches done/error. Does NOT write the final done marker
     here — that happens in the main flow after all commands finish.
     """
-    try:
-        from .agent import read_status
-    except ImportError:
-        log(f"    geno-agent not available — cannot poll agent {agent_id}")
+    read_status = _load_read_status()
+    if read_status is None:
+        log(f"    geno-agents not installed — cannot poll agent {agent_id}")
         return
 
     heard_line = current_status_line

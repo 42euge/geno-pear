@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geno-pear"
-version = "0.5.0"
+version = "0.6.0"
 description = "File-watch companion + ///command registry for the geno ecosystem."
 readme = "README.md"
 license = { text = "MIT" }
@@ -14,10 +14,12 @@ dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
+# Agent execution/tracking moved to geno-agents. geno-pear only polls its
+# registry to mirror status; the ///command protocol works without it.
+agents = ["geno-agents @ git+https://github.com/42euge/geno-agents.git"]
 
 [project.scripts]
 pear = "geno_pear.cli:main"
-geno-agent = "geno_pear.agent:main"
 
 [tool.setuptools.packages.find]
 include = ["geno_pear*"]

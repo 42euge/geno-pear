@@ -10,7 +10,7 @@ compose it (e.g. geno-vault). `from geno_pear import watch`
   removes the trigger line. Commands are created/edited in Obsidian directly.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from .watch import watch, mtime
 from .commands import process_commands, find_commands_dir, init_commands_dir
