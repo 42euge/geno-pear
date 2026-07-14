@@ -27,8 +27,19 @@ from pathlib import Path
 
 AGENTS_DIR = Path.home() / ".geno" / "agents"
 
-# Strip ANSI escape sequences when extracting status text from the PTY stream
-_ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# Strip ANSI/VT escape sequences when extracting status text from the PTY stream.
+# CSI: ESC [ <params 0x30-3f> <intermediates 0x20-2f> <final 0x40-7e>
+# OSC: ESC ] ... (BEL | ST)   DCS/other: ESC P/_/^/X ... ST
+# Also: charset selects, single ESC-<byte>, and bare control chars.
+_ANSI = re.compile(
+    rb"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]"     # CSI
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"            # OSC ... BEL/ST
+    rb"|\x1b[P_^X][^\x1b]*\x1b\\"                     # DCS/APC/PM/SOS ... ST
+    rb"|\x1b[()][AB0-2]"                              # charset select
+    rb"|\x1b[=>NODME78]"                              # misc single-char ESC
+    rb"|\x1b."                                        # any other ESC-<byte>
+    rb"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"             # bare control chars
+)
 
 # Sentinel prefix printed by commands that launch tracked agents
 AGENT_ID_PREFIX = "GENO_AGENT_ID="
@@ -140,9 +151,17 @@ def _last_meaningful_line(buf: bytes) -> str:
     text = _ANSI.sub(b"", buf).decode("utf-8", errors="replace")
     lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n")]
     for ln in reversed(lines):
-        # Skip empty, box-drawing-only, and prompt-cruft lines
-        if ln and not all(c in "─│╭╮╰╯━┃┏┓┗┛ >·•" for c in ln) and len(ln) > 2:
-            return ln[:80]
+        if len(ln) <= 2:
+            continue
+        # Skip box-drawing / prompt-decoration-only lines
+        if all(c in "─│╭╮╰╯━┃┏┓┗┛ >·•*✳✽✻✢·" for c in ln):
+            continue
+        # Require the line to be mostly letters (rejects leftover escape cruft
+        # like "[>0q[?2026$p" which is symbols/digits only)
+        letters = sum(c.isalpha() or c.isspace() for c in ln)
+        if letters < max(3, len(ln) * 0.5):
+            continue
+        return ln[:80]
     return ""
 
 
