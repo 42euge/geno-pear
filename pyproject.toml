@@ -20,6 +20,7 @@ agents = ["geno-agents @ git+https://github.com/42euge/geno-agents.git"]
 
 [project.scripts]
 pear = "geno_pear.cli:main"
+gp = "geno_pear.gp:main"
 
 [tool.setuptools.packages.find]
 include = ["geno_pear*"]
